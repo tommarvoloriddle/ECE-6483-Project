@@ -185,45 +185,6 @@ void create_button(int x, int y, int width, int height, const char *label)
     lcd.DisplayStringAt(x + width / 2 - strlen(label) * 19, y + height / 2 - 8, (uint8_t *)label, CENTER_MODE);
 }
 
-
-
-// Calculate the euclidean distance between two vectors
-// a: the first vector
-// b: the second vector
-// return: the euclidean distance between the two vectors
-float euclidean_distance(const array<float, 3> &a, const array<float, 3> &b)
-{
-    float sum = 0;
-    for (size_t i = 0; i < 3; ++i)
-    {
-        sum += (a[i] - b[i]) * (a[i] - b[i]);
-    }
-    return sqrt(sum);
-}
-
-// Calculate the DTW distance between two vectors
-// s: the first vector
-// t: the second vector
-// return: the DTW distance between the two vectors
-float dtw(const vector<array<float, 3>> &s, const vector<array<float, 3>> &t)
-{
-    vector<vector<float>> dtw_matrix(s.size() + 1, vector<float>(t.size() + 1, numeric_limits<float>::infinity()));
-
-    dtw_matrix[0][0] = 0;
-
-    for (size_t i = 1; i <= s.size(); ++i)
-    {
-        for (size_t j = 1; j <= t.size(); ++j)
-        {
-            float cost = euclidean_distance(s[i - 1], t[j - 1]);
-            dtw_matrix[i][j] = cost + min({dtw_matrix[i - 1][j], dtw_matrix[i][j - 1], dtw_matrix[i - 1][j - 1]});
-        }
-    }
-
-    return dtw_matrix[s.size()][t.size()];
-}
-
-
 // Process the data from the gyroscope
 // data: the data from the gyroscope
 void process_gyro_data(vector<array<float, 3>> &data)
