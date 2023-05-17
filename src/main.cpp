@@ -6,21 +6,198 @@
 #include <limits>
 #include <cmath>
 #include <math.h>
-#include "gyro.h"
+// #include "gyro.h"
+
+
+// Register addresses
+
+#define CTRL_REG_1 0x20 // control register 1
+#define CTRL_REG_3 0x22 // control register 3
+#define CTRL_REG_4 0x23 // control register 4
+
+#define OUT_X_L 0x28 // X-axis angular rate data Low
+
+#define INT1_SRC 0x31 // interrupt 1 source register
+// Output data rate selections and cutoff frequencies
+
+#define ODR_200_CUTOFF_50 0x60
+
+// Interrupt configurations
+#define INT2_DRDY 0x08 // Data ready on DRDY/INT2 pin
+
+// Fullscale selections
+#define FULL_SCALE_245 0x00      // full scale 245 dps
+#define FULL_SCALE_500 0x10      // full scale 500 dps
+#define FULL_SCALE_2000 0x20     // full scale 2000 dps
+#define FULL_SCALE_2000_ALT 0x30 // full scale 2000 dps
+
+// Sensitivities in dps/digit
+#define SENSITIVITY_245 0.00875f // 245 dps typical sensitivity
+#define SENSITIVITY_500 0.0175f  // 500 dps typical sensitivity
+#define SENSITIVITY_2000 0.07f   // 2000 dps typical sensitivity
+
+// Convert constants
+#define MY_LEG 1              // put board on left leg 0.8m above ground
+#define DEGREE_TO_RAD 0.0175f // rad = dgree * (pi / 180)
+
+#define POWERON 0x0f  // turn gyroscope
+#define POWEROFF 0x00 // turnoff gyroscope
+
+
+// Initialization parameters
+typedef struct
+{
+    uint8_t conf1;       // output data rate
+    uint8_t conf3;       // interrupt configuration
+    uint8_t conf4;       // full sacle selection
+} Gyroscope_Init_Parameters;
+
+// Raw data
+typedef struct
+{
+    int16_t x_raw; // X-axis raw data
+    int16_t y_raw; // Y-axis raw data
+    int16_t z_raw; // Z-axis raw data
+} Gyroscope_RawData;
+
+
+//initialize the SPI interface for communication with GYRO
+SPI gyroscope(PF_9, PF_8, PF_7); // mosi, miso, sclk
+DigitalOut cs(PC_1);
+
+int16_t x_threshold; // X-axis calibration threshold
+int16_t y_threshold; // Y-axis calibration threshold
+int16_t z_threshold; // Z-axis calibration threshold
+
+int16_t x_sample; // X-axis zero-rate level sample
+int16_t y_sample; // Y-axis zero-rate level sample
+int16_t z_sample; // Z-axis zero-rate level sample
+
+float sensitivity = 0.0f;
+
+Gyroscope_RawData *gyro_raw;
+
+// Write I/O
+void WriteByte(uint8_t address, uint8_t data)
+{
+  cs = 0;
+  gyroscope.write(address);
+  gyroscope.write(data);
+  cs = 1;
+}
+
+// Get raw data from gyroscope
+void GetGyroValue(Gyroscope_RawData *rawdata)
+{
+  cs = 0;
+  gyroscope.write(OUT_X_L | 0x80 | 0x40); // auto-incremented read
+  rawdata->x_raw = gyroscope.write(0xff) | gyroscope.write(0xff) << 8;
+  rawdata->y_raw = gyroscope.write(0xff) | gyroscope.write(0xff) << 8;
+  rawdata->z_raw = gyroscope.write(0xff) | gyroscope.write(0xff) << 8;
+  cs = 1;
+}
+
+// Calibrate gyroscope before recording
+// Find the "turn-on" zero rate level
+// Set up thresholds for three axes
+// Data below the corresponding threshold will be treated as zero to offset random vibrations when walking
+void CalibrateGyroscope(Gyroscope_RawData *rawdata)
+{
+  int16_t sumX = 0;
+  int16_t sumY = 0;
+  int16_t sumZ = 0;
+  for (int i = 0; i < 128; i++)
+  {
+    GetGyroValue(rawdata);
+    sumX += rawdata->x_raw;
+    sumY += rawdata->y_raw;
+    sumZ += rawdata->z_raw;
+    x_threshold = max(x_threshold, rawdata->x_raw);
+    y_threshold = max(y_threshold, rawdata->y_raw);
+    z_threshold = max(z_threshold, rawdata->z_raw);
+    wait_us(10000);
+  }
+
+  x_sample = sumX >> 7; // 128 is 2^7
+  y_sample = sumY >> 7;
+  z_sample = sumZ >> 7;
+}
+
+// Initiate gyroscope, set up control registers
+void InitiateGyroscope(Gyroscope_Init_Parameters *init_parameters, Gyroscope_RawData *init_raw_data)
+{
+  gyro_raw = init_raw_data;
+  cs = 1;
+  // set up gyroscope
+  gyroscope.format(8, 3);       // 8 bits per SPI frame; polarity 1, phase 0
+  gyroscope.frequency(1000000); // clock frequency deafult 1 MHz max:10MHz
+
+  WriteByte(CTRL_REG_1, init_parameters->conf1 | POWERON); // set ODR Bandwidth and enable all 3 axises
+  WriteByte(CTRL_REG_3, init_parameters->conf3);           // DRDY enable
+  WriteByte(CTRL_REG_4, init_parameters->conf4);           // LSB, full sacle selection: 500dps
+
+  switch (init_parameters->conf4)
+  {
+  case FULL_SCALE_245:
+    sensitivity = SENSITIVITY_245;
+    break;
+
+  case FULL_SCALE_500:
+    sensitivity = SENSITIVITY_500;
+    break;
+
+  case FULL_SCALE_2000:
+    sensitivity = SENSITIVITY_2000;
+    break;
+
+  case FULL_SCALE_2000_ALT:
+    sensitivity = SENSITIVITY_2000;
+    break;
+  }
+
+  CalibrateGyroscope(gyro_raw); // calibrate the gyroscope and find the threshold for x, y, and z.
+}
+
+// convert raw data to dps
+float ConvertToDPS(int16_t axis_data)
+{
+  float dps = axis_data * sensitivity;
+  return dps;
+}
+
+// convert raw data to calibrated data directly
+void GetCalibratedRawData()
+{
+  GetGyroValue(gyro_raw);
+
+  // offset the zero rate level
+  gyro_raw->x_raw -= x_sample;
+  gyro_raw->y_raw -= y_sample;
+  gyro_raw->z_raw -= z_sample;
+
+  // put data below threshold to zero
+  if (abs(gyro_raw->x_raw) < abs(x_threshold))
+    gyro_raw->x_raw = 0;
+  if (abs(gyro_raw->y_raw) < abs(y_threshold))
+    gyro_raw->y_raw = 0;
+  if (abs(gyro_raw->z_raw) < abs(z_threshold))
+    gyro_raw->z_raw = 0;
+}
+
 
 vector<array<float, 3>> gesture_key; // the gesture key
 vector<array<float, 3>> unlocking_record; // the unlocking record
 
-const int button1_x = 10;
-const int button1_y = 100;
-const int button1_width = 100;
-const int button1_height = 50;
-const char *button1_label = "UNLOCK";
+const int ButtonX = 10; //button for screen
+const int ButtonY = 100;
+const int Button1Width = 100;
+const int Button1Height = 50;
+const char *Button1Label = "UNLOCK";
 
 int err = 0; // for error checking
 
-// error tolerance for gesture recognition
-#define EPSILON 0.3000000119F
+// tollerance
+#define EPSILON 0.45f
 
 //Text size
 #define TEXT_SIZE 24
@@ -32,7 +209,7 @@ int err = 0; // for error checking
 #define READY 8
 
 InterruptIn gyro_int2(PA_2, PullDown);
-InterruptIn user_button(USER_BUTTON, PullDown);
+InterruptIn ResetButton(USER_BUTTON, PullDown);
 
 DigitalOut green_led(LED1);
 DigitalOut red_led(LED2);
@@ -47,11 +224,11 @@ EventFlags flags; // Event flags
 
 Timer timer; // Timer
 
-const int button2_x = 121;
-const int button2_y = 100;
-const int button2_width = 100;
-const int button2_height = 50;
-const char *button2_label = "RECORD";
+const int Button2X = 121; //button for screen
+const int Button2Y = 100;
+const int Button2Width = 100;
+const int Button2Height = 50;
+const char *Button2Label = "RECORD";
 
 void button_press() // button press ISR
 {
@@ -70,15 +247,14 @@ const int text_y = 270;
 const char *text_0 = "NO GUESTURE RECORDED";
 const char *text_1 = "LOCKED";
 
-
-// Detect if the touch is inside a button
-// touch_x: the x coordinate of the touch
-// touch_y: the y coordinate of the touch
-// button_x: the x coordinate of the button
-// button_y: the y coordinate of the button
-// button_width: the width of the button
-// button_height: the height of the button
-// return: true if the touch is inside the button, false otherwise
+// Check if the touch is inside a button
+// @param touch_x: the x coordinate of the touch
+// @param touch_y: the y coordinate of the touch
+// @param button_x: the x coordinate of the button
+// @param button_y: the y coordinate of the button
+// @param button_width: the width of the button
+// @param button_height: the height of the button
+// @return: true if the touch is inside the button, false otherwise
 bool detect_touch(int touch_x, int touch_y, int button_x, int button_y, int button_width, int button_height) {
     return (touch_x >= button_x && touch_x <= button_x + button_width &&
             touch_y >= button_y && touch_y <= button_y + button_height);
@@ -108,7 +284,7 @@ void display()
             int touch_y = ts_state.Y - 50;
             printf("Touch values: x = %d, y = %d\n", touch_x, touch_y);
             // Check if the touch is inside record button
-            if (detect_touch(touch_x, touch_y, button2_x, button2_y, button1_width, button1_height))
+            if (detect_touch(touch_x, touch_y, Button2X, Button2Y, Button1Width, Button1Height))
             {
                 sprintf(display_buffer, "Recording");
                 lcd.SetTextColor(LCD_COLOR_BLACK);                  
@@ -120,7 +296,7 @@ void display()
             }
 
             // Check if the touch is inside unlock button
-            if (detect_touch(touch_x, touch_y, button1_x, button1_y, button2_width, button2_height))
+            if (detect_touch(touch_x, touch_y, ButtonX, ButtonY, Button2Width, Button2Height))
             {
                 sprintf(display_buffer, "Wait");
                 lcd.SetTextColor(LCD_COLOR_BLACK);                  
@@ -136,9 +312,9 @@ void display()
 }
 
 // Save the gesture key to memory
-// gesture: the gesture key to be saved
-// address: the address of the flash to save the gesture key
-// return: true if the gesture key is saved successfully, false otherwise
+// @param gesture: the gesture key to be saved
+// @param address: the address of the flash to save the gesture key
+// @return: true if the gesture key is saved successfully, false otherwise
 bool store_gyro_Data(vector<array<float, 3>> &gesture, uint32_t address)
 {
     FlashIAP flash;
@@ -159,9 +335,9 @@ bool store_gyro_Data(vector<array<float, 3>> &gesture, uint32_t address)
 }
 
 // Read the gesture key from memory
-// address: the address of the flash to read the gesture key
-// length: the length of the gesture key to be read
-// return: the gesture key read from the flash
+// @param address: the address of the flash to read the gesture key
+// @param length: the length of the gesture key to be read
+// @return the gesture key read from the flash
 vector<array<float, 3>> read_gyro_data(uint32_t address, size_t length)
 {
     vector<array<float, 3>> gesture_key(length);
@@ -240,6 +416,7 @@ float correlation(const vector<float> &a, const vector<float> &b)
 
     float sum_a = 0, sum_b = 0, sum_ab = 0, sq_sum_a = 0, sq_sum_b = 0;
 
+//calculate running sum and running square of a and b vectors.
     for (size_t i = 0; i < a.size(); ++i)
     {
         sum_a += a[i];
@@ -251,17 +428,14 @@ float correlation(const vector<float> &a, const vector<float> &b)
 
     size_t n = a.size(); // number of elements
 
-    float numerator = n * sum_ab - sum_a * sum_b; // Covariance
+    float numerator = n * sum_ab - sum_a * sum_b; // Covariance for numerator
     
-    float denominator = sqrt((n * sq_sum_a - sum_a * sum_a) * (n * sq_sum_b - sum_b * sum_b)); // Standard deviation
+    float denominator = sqrt((n * sq_sum_a - sum_a * sum_a) * (n * sq_sum_b - sum_b * sum_b)); // Standard deviation for denominator
 
     return numerator / denominator;
 }
 
-// Calculate the similarity between two vectors
-// vec1: the first vector
-// vec2: the second vector
-// return: the similarity between the two vectors
+// Calculate the similarity between two vectors for v1 and v2
 array<float, 3> calculate_similarity(vector<array<float, 3>>& vec1, vector<array<float, 3>>& vec2) {
     array<float, 3> result;
 
@@ -510,13 +684,13 @@ void record_gyro()
 
                 if (err != 0)
                 {
-                    printf("Error calculating correlation: vectors have different sizes\n");
+                    printf("Error in correlation: different sizes!\n");
                 }
                 else
                 {
                     printf("Correlation values: x = %f, y = %f, z = %f\n", correlationResult[0], correlationResult[1], correlationResult[2]);
                     
-                    // iterate through correlationResult to check if all values are above threshold
+                    // check for thresholding
                     for (size_t i = 0; i < correlationResult.size(); i++)
                     {
                         if (correlationResult[i] > EPSILON)
@@ -526,7 +700,7 @@ void record_gyro()
                     }
                 }
 
-                if (unlock==3) // TODO: need to find a better threshold
+                if (unlock==3) // need to find a better threshold
                 {
                     sprintf(display_buffer, "OPENED");
                     lcd.SetTextColor(LCD_COLOR_BLACK);                  
@@ -568,40 +742,45 @@ void record_gyro()
 int main()
 {
     lcd.Clear(LCD_COLOR_BLACK);
-    // Draw buttons
-    create_button(button1_x, button1_y, button1_width, button1_height, button1_label);
-    create_button(button2_x, button2_y, button2_width, button2_height, button2_label);
+    // Draw buttons on the screen
+create_button(ButtonX, ButtonY, Button1Width, Button1Height, Button1Label);
+create_button(Button2X, Button2Y, Button2Width, Button2Height, Button2Label);
 
-    lcd.DisplayStringAt(message_x, message_y, (uint8_t *)message, CENTER_MODE);
+// Display a message on the LCD screen
+lcd.DisplayStringAt(message_x, message_y, (uint8_t *)message, CENTER_MODE);
 
-    // initialize all interrupts
-    user_button.rise(&button_press);
-    gyro_int2.rise(&onGyroDataReady);
+// Initialize interrupts for user button and gyroscope
+ResetButton.rise(&button_press);
+gyro_int2.rise(&onGyroDataReady);
 
-    if (gesture_key.empty())
-    {
-        red_led = 0;
-        green_led = 1;
-        lcd.DisplayStringAt(text_x, text_y, (uint8_t *)text_0, CENTER_MODE);
-    }
-    else
-    {
-        red_led = 1;
-        green_led = 0;
-        lcd.DisplayStringAt(text_x, text_y, (uint8_t *)text_1, CENTER_MODE);
-    }
+// Check if the gesture key is empty
+if (gesture_key.empty())
+{
+    // Turn on the green LED and display a message on the LCD screen
+    red_led = 0;
+    green_led = 1;
+    lcd.DisplayStringAt(text_x, text_y, (uint8_t *)text_0, CENTER_MODE);
+}
+else
+{
+    // Turn on the red LED and display a message on the LCD screen
+    red_led = 1;
+    green_led = 0;
+    lcd.DisplayStringAt(text_x, text_y, (uint8_t *)text_1, CENTER_MODE);
+}
 
-    // Gyroscope initialization
-    Thread key_saving;
-    key_saving.start(callback(record_gyro));
+// Initialize gyroscope
+Thread key_saving;
+key_saving.start(callback(record_gyro));
 
-    // Touch screen initialization
-    Thread touch_thread;
-    touch_thread.start(callback(display));
+// Initialize touch screen
+Thread touch_thread;
+touch_thread.start(callback(display));
 
-    // Run the main loop
-    while (1)
-    {
-        ThisThread::sleep_for(100ms);
-    }
+// Run the main loop
+while (1)
+{
+    // Sleep for 100ms before repeating the loop
+    ThisThread::sleep_for(100ms);
+}
 }
